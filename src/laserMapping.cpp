@@ -265,7 +265,6 @@ float globalMapVisualizationPoseDensity;
 float globalMapVisualizationLeafSize;
 
 
-
 /**
  * 更新里程计轨迹
  */
@@ -285,7 +284,7 @@ void updatePath(const PointTypePose &pose_in)
     pose_stamped.pose.orientation.z = q.z();
     pose_stamped.pose.orientation.w = q.w();
 
-    globalPath.poses.push_back(pose_stamped);
+    //globalPath.poses.push_back(pose_stamped);
 }
 
 /**
@@ -310,7 +309,7 @@ pcl::PointCloud<PointType>::Ptr transformPointCloud(pcl::PointCloud<PointType>::
     Eigen::Isometry3d  T_w_lidar  =  T_w_b * T_b_lidar  ;           //  T_w_lidar  转换矩阵
 
     Eigen::Isometry3d transCur = T_w_lidar;        
-    
+
     for (int i = 0; i < cloudSize; ++i)
     {
         const auto &pointFrom = cloudIn->points[i];
@@ -667,18 +666,7 @@ void saveKeyFramesAndFactor()
     state_updated.pos = pos;
     state_updated.rot =  q;
     state_point = state_updated; // 对state_point进行更新，state_point可视化用到
-    // if(aLoopIsClosed == true )
     kf.change_x(state_updated);  //  对cur_pose 进行isam2优化后的修正
-
-    // TODO:  P的修正有待考察，按照yanliangwang的做法，修改了p，会跑飞
-    // esekfom::esekf<state_ikfom, 12, input_ikfom>::cov P_updated = kf.get_P(); // 获取当前的状态估计的协方差矩阵
-    // P_updated.setIdentity();
-    // P_updated(6, 6) = P_updated(7, 7) = P_updated(8, 8) = 0.00001;
-    // P_updated(9, 9) = P_updated(10, 10) = P_updated(11, 11) = 0.00001;
-    // P_updated(15, 15) = P_updated(16, 16) = P_updated(17, 17) = 0.0001;
-    // P_updated(18, 18) = P_updated(19, 19) = P_updated(20, 20) = 0.001;
-    // P_updated(21, 21) = P_updated(22, 22) = 0.00001;
-    // kf.change_P(P_updated);
 
     // 当前帧激光角点、平面点，降采样集合
     // pcl::PointCloud<PointType>::Ptr thisCornerKeyFrame(new pcl::PointCloud<PointType>());
@@ -893,38 +881,38 @@ void performLoopClosure()
             publishCloud(&pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, odometryFrame);
     }
 
-    // ICP Settings
-    pcl::IterativeClosestPoint<PointType, PointType> icp;
-    icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
-    icp.setMaximumIterations(100);
-    icp.setTransformationEpsilon(1e-6);
-    icp.setEuclideanFitnessEpsilon(1e-6);
-    icp.setRANSACIterations(0);
+    // GICP Settings
+    pcl::GeneralizedIterativeClosestPoint<PointType, PointType> gicp;
+    gicp.setMaxCorrespondenceDistance(150); // Use a value that covers 2 * historyKeyframeSearchNum range in meters
+    gicp.setMaximumIterations(100);
+    gicp.setTransformationEpsilon(1e-6);
+    gicp.setEuclideanFitnessEpsilon(1e-6);
+    gicp.setRANSACIterations(0); // 设置RANSAC迭代次数，0表示禁用RANSAC
 
-    // scan-to-map，调用icp匹配
-    icp.setInputSource(cureKeyframeCloud);
-    icp.setInputTarget(prevKeyframeCloud);
+    // Scan-to-map alignment
+    gicp.setInputSource(cureKeyframeCloud);
+    gicp.setInputTarget(prevKeyframeCloud);
     pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
-    icp.align(*unused_result);
+    gicp.align(*unused_result);
 
     // 未收敛，或者匹配不够好
-    if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore)
+    if (gicp.hasConverged() == false || gicp.getFitnessScore() > historyKeyframeFitnessScore)
         return;
 
-    std::cout << "icp  success  " << std::endl;
+    std::cout << "gicp  success  " << std::endl;
 
     // 发布当前关键帧经过闭环优化后的位姿变换之后的特征点云
     if (pubIcpKeyFrames.getNumSubscribers() != 0)
     {
         pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
-        pcl::transformPointCloud(*cureKeyframeCloud, *closed_cloud, icp.getFinalTransformation());
+        pcl::transformPointCloud(*cureKeyframeCloud, *closed_cloud, gicp.getFinalTransformation());
         publishCloud(&pubIcpKeyFrames, closed_cloud, timeLaserInfoStamp, odometryFrame);
     }
 
     // 闭环优化得到的当前关键帧与闭环关键帧之间的位姿变换
     float x, y, z, roll, pitch, yaw;
     Eigen::Affine3f correctionLidarFrame;
-    correctionLidarFrame = icp.getFinalTransformation();
+    correctionLidarFrame = gicp.getFinalTransformation();
 
     // 闭环优化前当前帧位姿
     Eigen::Affine3f tWrong = pclPointToAffine3f(copy_cloudKeyPoses6D->points[loopKeyCur]);
@@ -935,7 +923,7 @@ void performLoopClosure()
     // 闭环匹配帧的位姿
     gtsam::Pose3 poseTo = pclPointTogtsamPose3(copy_cloudKeyPoses6D->points[loopKeyPre]);
     gtsam::Vector Vector6(6);
-    float noiseScore = icp.getFitnessScore() ; //  loop_clousre  noise from icp
+    float noiseScore = gicp.getFitnessScore() ; //  loop_clousre  noise from icp
     Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
     gtsam::noiseModel::Diagonal::shared_ptr constraintNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
     std::cout << "loopNoiseQueue   =   " << noiseScore << std::endl;
@@ -1454,7 +1442,7 @@ void publish_path(const ros::Publisher pubPath)
     jjj++;
     if (jjj % 10 == 0) 
     {
-        path.poses.push_back(msg_body_pose);
+        // path.poses.push_back(msg_body_pose);
         pubPath.publish(path);
     }
 }
@@ -1598,6 +1586,10 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 
 int main(int argc, char** argv)
 {
+    for (int i = 0; i < 6; ++i)
+    {
+        transformTobeMapped[i] = 0;
+    }
     ros::init(argc, argv, "laserMapping");
     ros::NodeHandle nh;
 
@@ -1870,6 +1862,7 @@ int main(int argc, char** argv)
             // 3.执行因子图优化
             // 4.得到当前帧优化后的位姿，位姿协方差
             // 5.添加cloudKeyPoses3D，cloudKeyPoses6D，更新transformTobeMapped，添加当前关键帧的角点、平面点集合
+            getCurPose(state_point); //   更新transformTobeMapped
             saveKeyFramesAndFactor();
             // 更新因子图中所有变量节点的位姿，也就是所有历史关键帧的位姿，更新里程计轨迹， 重构ikdtree
             correctPoses();
