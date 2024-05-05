@@ -60,6 +60,43 @@
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
 
+#include <std_msgs/Header.h>
+#include <std_msgs/Float64MultiArray.h>
+#include <sensor_msgs/Imu.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/NavSatFix.h>
+#include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
+
+#include <pcl/search/impl/search.hpp>
+#include <pcl/range_image/range_image.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/common/common.h>
+#include <pcl/common/transforms.h>
+#include <pcl/registration/icp.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/filters/filter.h>
+#include <pcl/filters/crop_box.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/registration/gicp.h>
+
+// gstam
+#include <gtsam/geometry/Rot3.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/slam/PriorFactor.h>
+#include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/navigation/GPSFactor.h>
+#include <gtsam/navigation/ImuFactor.h>
+#include <gtsam/navigation/ImuBias.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/nonlinear/Marginals.h>
+#include <gtsam/nonlinear/Values.h>
+#include <gtsam/inference/Symbol.h>
+#include <gtsam/nonlinear/ISAM2.h>
+
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
 #define MAXN                (720000)
