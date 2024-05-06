@@ -521,9 +521,11 @@ void visualizeLoopClosure()
     pubLoopConstraintEdge.publish(markerArray);
 }
 
-/**
- * 计算当前帧与前一帧位姿变换，如果变化太小，不设为关键帧，反之设为关键帧
- */
+    /**
+     * 是否将当前帧选择为关键帧。
+     * 当距离不够且角度不够时，不会将当前帧选择为关键帧。
+     * 对于非关键帧的点云帧，只做点云匹配校准里程计。对于关键帧，则会加入因子图进行优化
+    */
 bool saveFrame()
 {
     if (cloudKeyPoses3D->points.empty())
@@ -550,9 +552,12 @@ bool saveFrame()
     return true;
 }
 
-/**
- * 添加激光里程计因子
- */
+    /**
+     * 2. 添加激光里程计因子
+     *   1）若是第一帧，则构建prior因子，赋予较大的方差
+     *   2）后续帧，根据当前的位姿估计，以及上一个关键帧的位姿，计算位姿增量，添加间隔因子（BetweenFactor);
+     *      同时，将当前帧当前的位姿估计作为因子图当前变量的初始值。
+    */
 void addOdomFactor()
 {
     if (cloudKeyPoses3D->points.empty())
@@ -576,9 +581,13 @@ void addOdomFactor()
     }
 }
 
-/**
- * 添加闭环因子
- */
+    /**
+     * 4. 添加回环因子（回环信息由独立线程提供）
+     *   1）回环队列为空，直接返回
+     *   2）遍历回环关系，将所有回环关系加入因子图
+     *   3）清空回环关系
+     *   4）设置aLoopGpsIsClosed标志位为true，后面因子图优化时会多次迭代且更新所有历史关键帧位姿
+    */
 void addLoopFactor()
 {
     if (loopIndexQueue.empty())
@@ -602,6 +611,28 @@ void addLoopFactor()
     aLoopIsClosed = true;
 }
 
+    /**
+     * 添加因子并执行图优化，更新当前位姿
+     * 1. 只有在当前帧距离上一帧足够远（距离、角度）时，才纳入为关键帧，并加入因子图
+     * 2. 添加激光里程计因子
+     *      1）若是第一帧，则构建prior因子，赋予较大的方差
+     *      2）后续帧，根据当前的位姿估计，以及上一个关键帧的位姿，计算位姿增量，添加间隔因子（BetweenFactor);
+     *          同时，将当前帧当前的位姿估计作为因子图当前变量的初始值。
+     * 3. 添加回环因子（回环信息由独立线程提供）
+     *      1）回环队列为空，直接返回
+     *      2）遍历回环关系，将所有回环关系加入因子图
+     *      3）清空回环关系
+     *      4）设置aLoopGpsIsClosed标志位为true，后面因子图优化时会多次迭代且更新所有历史关键帧位姿
+     * 4. 因子图优化
+     *      1）将当前因子图加入优化器
+     *      2）对优化器执行一次迭代更新
+     *      3）如果aLoopGpsIsClosed为真，额外执行5次优化器迭代
+     *      4）清空因子图和初始值（ISAM优化器已经记录这些信息）
+     *      5）将当前帧位姿加入关键帧队列
+     *      6）将优化后的结果更新为当前位姿
+     *      7）保存当前帧特征点到特征点集合
+     *      8）当当前帧位姿更新到轨迹缓存变量
+    */
 void saveKeyFramesAndFactor()
 {
     //  计算当前帧与前一帧位姿变换，如果变化太小，不设为关键帧，反之设为关键帧
@@ -733,9 +764,13 @@ void recontructIKdTree(){
         updateKdtreeCount ++ ; 
 }
 
-/**
- * 更新因子图中所有变量节点的位姿，也就是所有历史关键帧的位姿，更新里程计轨迹
- */
+    /**
+     * 更新所有历史关键帧位姿
+     * 1. 只当aLoopGpsIsClosed标志位为真时才执行历史关键帧位姿更新
+     * 2. 从因子图优化器中拿出所有关键帧的位姿（优化结果）
+     * 3. 清空全局路径变量，替换成当前的关键帧位姿序列
+     * 4. 将优化后的位姿更新为当前的位姿
+    */
 void correctPoses()
 {
     if (cloudKeyPoses3D->points.empty())
@@ -1863,8 +1898,11 @@ int main(int argc, char** argv)
             // 4.得到当前帧优化后的位姿，位姿协方差
             // 5.添加cloudKeyPoses3D，cloudKeyPoses6D，更新transformTobeMapped，添加当前关键帧的角点、平面点集合
             getCurPose(state_point); //   更新transformTobeMapped
+
+            // 计算是否将当前帧采纳为关键帧，加入因子图优化
             saveKeyFramesAndFactor();
-            // 更新因子图中所有变量节点的位姿，也就是所有历史关键帧的位姿，更新里程计轨迹， 重构ikdtree
+            // 当新的回环因子或者GPS因子加入因子图时，对历史帧执行位姿更新
+            // 更新里程计轨迹， 重构ikdtree
             correctPoses();
 
             /******* Publish odometry *******/
