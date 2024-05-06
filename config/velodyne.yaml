@@ -29,9 +29,9 @@ publish:
   dense_publish_en: false       # false: low down the points number in a global-frame point clouds scan.
   scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
 
-path_save_en: true                 # 保存轨迹，用于精度计算和比较
+path_save_en: false                 # 保存轨迹，用于精度计算和比较
 
 pcd_save:
-  pcd_save_en: true
+  pcd_save_en: false
   interval: -1                 # how many LiDAR frames saved in each pcd file;
   # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
