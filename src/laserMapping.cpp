@@ -1893,7 +1893,7 @@ int main(int argc, char** argv)
 
             /*back end*/
             // 1.计算当前帧与前一帧位姿变换，如果变化太小，不设为关键帧，反之设为关键帧
-            // 2.添加激光里程计因子、GPS因子、闭环因子
+            // 2.添加激光里程计因子、闭环因子
             // 3.执行因子图优化
             // 4.得到当前帧优化后的位姿，位姿协方差
             // 5.添加cloudKeyPoses3D，cloudKeyPoses6D，更新transformTobeMapped，添加当前关键帧的角点、平面点集合
@@ -1901,7 +1901,8 @@ int main(int argc, char** argv)
 
             // 计算是否将当前帧采纳为关键帧，加入因子图优化
             saveKeyFramesAndFactor();
-            // 当新的回环因子或者GPS因子加入因子图时，对历史帧执行位姿更新
+
+            // 当新的回环因子加入因子图时，对历史帧执行位姿更新
             // 更新里程计轨迹， 重构ikdtree
             correctPoses();
 
