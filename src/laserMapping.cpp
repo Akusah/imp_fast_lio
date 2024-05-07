@@ -102,6 +102,356 @@
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
+#include "Scancontext.h"
+
+
+////          Scancontext              ///////////
+// namespace SC2
+// {
+
+void coreImportTest (void)
+{
+    cout << "scancontext lib is successfully imported." << endl;
+} // coreImportTest
+
+
+float rad2deg(float radians)
+{
+    return radians * 180.0 / M_PI;
+}
+
+float deg2rad(float degrees)
+{
+    return degrees * M_PI / 180.0;
+}
+
+
+float xy2theta( const float & _x, const float & _y )
+{
+    if ( (_x >= 0) & (_y >= 0)) 
+        return (180/M_PI) * atan(_y / _x);
+
+    if ( (_x < 0) & (_y >= 0)) 
+        return 180 - ( (180/M_PI) * atan(_y / (-_x)) );
+
+    if ( (_x < 0) & (_y < 0)) 
+        return 180 + ( (180/M_PI) * atan(_y / _x) );
+
+    if ( (_x >= 0) & (_y < 0))
+        return 360 - ( (180/M_PI) * atan((-_y) / _x) );
+} // xy2theta
+
+
+MatrixXd circshift( MatrixXd &_mat, int _num_shift )
+{
+    // shift columns to right direction 
+    assert(_num_shift >= 0);
+
+    if( _num_shift == 0 )
+    {
+        MatrixXd shifted_mat( _mat );
+        return shifted_mat; // Early return 
+    }
+
+    MatrixXd shifted_mat = MatrixXd::Zero( _mat.rows(), _mat.cols() );
+    for ( int col_idx = 0; col_idx < _mat.cols(); col_idx++ )
+    {
+        int new_location = (col_idx + _num_shift) % _mat.cols();
+        shifted_mat.col(new_location) = _mat.col(col_idx);
+    }
+
+    return shifted_mat;
+
+} // circshift
+
+
+std::vector<float> eig2stdvec( MatrixXd _eigmat )
+{
+    std::vector<float> vec( _eigmat.data(), _eigmat.data() + _eigmat.size() );
+    return vec;
+} // eig2stdvec
+
+
+double SCManager::distDirectSC ( MatrixXd &_sc1, MatrixXd &_sc2 )
+{
+    int num_eff_cols = 0; // i.e., to exclude all-nonzero sector
+    double sum_sector_similarity = 0;
+    for ( int col_idx = 0; col_idx < _sc1.cols(); col_idx++ )
+    {
+        VectorXd col_sc1 = _sc1.col(col_idx);
+        VectorXd col_sc2 = _sc2.col(col_idx);
+        
+        if( (col_sc1.norm() == 0) | (col_sc2.norm() == 0) )
+            continue; // don't count this sector pair. 
+
+        double sector_similarity = col_sc1.dot(col_sc2) / (col_sc1.norm() * col_sc2.norm());
+
+        sum_sector_similarity = sum_sector_similarity + sector_similarity;
+        num_eff_cols = num_eff_cols + 1;
+    }
+    
+    double sc_sim = sum_sector_similarity / num_eff_cols;
+    return 1.0 - sc_sim;
+
+} // distDirectSC
+
+
+int SCManager::fastAlignUsingVkey( MatrixXd & _vkey1, MatrixXd & _vkey2)
+{
+    int argmin_vkey_shift = 0;
+    double min_veky_diff_norm = 10000000;
+    for ( int shift_idx = 0; shift_idx < _vkey1.cols(); shift_idx++ )
+    {
+        MatrixXd vkey2_shifted = circshift(_vkey2, shift_idx);
+
+        MatrixXd vkey_diff = _vkey1 - vkey2_shifted;
+
+        double cur_diff_norm = vkey_diff.norm();
+        if( cur_diff_norm < min_veky_diff_norm )
+        {
+            argmin_vkey_shift = shift_idx;
+            min_veky_diff_norm = cur_diff_norm;
+        }
+    }
+
+    return argmin_vkey_shift;
+
+} // fastAlignUsingVkey
+
+
+std::pair<double, int> SCManager::distanceBtnScanContext( MatrixXd &_sc1, MatrixXd &_sc2 )
+{
+    // 1. fast align using variant key (not in original IROS18)
+    MatrixXd vkey_sc1 = makeSectorkeyFromScancontext( _sc1 );
+    MatrixXd vkey_sc2 = makeSectorkeyFromScancontext( _sc2 );
+    int argmin_vkey_shift = fastAlignUsingVkey( vkey_sc1, vkey_sc2 );
+
+    const int SEARCH_RADIUS = round( 0.5 * SEARCH_RATIO * _sc1.cols() ); // a half of search range 
+    std::vector<int> shift_idx_search_space { argmin_vkey_shift };
+    for ( int ii = 1; ii < SEARCH_RADIUS + 1; ii++ )
+    {
+        shift_idx_search_space.push_back( (argmin_vkey_shift + ii + _sc1.cols()) % _sc1.cols() );
+        shift_idx_search_space.push_back( (argmin_vkey_shift - ii + _sc1.cols()) % _sc1.cols() );
+    }
+    std::sort(shift_idx_search_space.begin(), shift_idx_search_space.end());
+
+    // 2. fast columnwise diff 
+    int argmin_shift = 0;
+    double min_sc_dist = 10000000;
+    for ( int num_shift: shift_idx_search_space )
+    {
+        MatrixXd sc2_shifted = circshift(_sc2, num_shift);
+        double cur_sc_dist = distDirectSC( _sc1, sc2_shifted );
+        if( cur_sc_dist < min_sc_dist )
+        {
+            argmin_shift = num_shift;
+            min_sc_dist = cur_sc_dist;
+        }
+    }
+
+    return make_pair(min_sc_dist, argmin_shift);
+
+} // distanceBtnScanContext
+
+
+MatrixXd SCManager::makeScancontext( pcl::PointCloud<SCPointType> & _scan_down )
+{
+    TicToc t_making_desc;
+
+    int num_pts_scan_down = _scan_down.points.size();
+
+    // main
+    const int NO_POINT = -1000;
+    MatrixXd desc = NO_POINT * MatrixXd::Ones(PC_NUM_RING, PC_NUM_SECTOR);
+
+    SCPointType pt;
+    float azim_angle, azim_range; // wihtin 2d plane
+    int ring_idx, sctor_idx;
+    for (int pt_idx = 0; pt_idx < num_pts_scan_down; pt_idx++)
+    {
+        pt.x = _scan_down.points[pt_idx].x; 
+        pt.y = _scan_down.points[pt_idx].y;
+        pt.z = _scan_down.points[pt_idx].z + LIDAR_HEIGHT; // naive adding is ok (all points should be > 0).
+
+        // xyz to ring, sector
+        azim_range = sqrt(pt.x * pt.x + pt.y * pt.y);
+        azim_angle = xy2theta(pt.x, pt.y);
+
+        // if range is out of roi, pass
+        if( azim_range > PC_MAX_RADIUS )
+            continue;
+
+        ring_idx = std::max( std::min( PC_NUM_RING, int(ceil( (azim_range / PC_MAX_RADIUS) * PC_NUM_RING )) ), 1 );
+        sctor_idx = std::max( std::min( PC_NUM_SECTOR, int(ceil( (azim_angle / 360.0) * PC_NUM_SECTOR )) ), 1 );
+
+        // taking maximum z 
+        if ( desc(ring_idx-1, sctor_idx-1) < pt.z ) // -1 means cpp starts from 0
+            desc(ring_idx-1, sctor_idx-1) = pt.z; // update for taking maximum value at that bin
+    }
+
+    // reset no points to zero (for cosine dist later)
+    for ( int row_idx = 0; row_idx < desc.rows(); row_idx++ )
+        for ( int col_idx = 0; col_idx < desc.cols(); col_idx++ )
+            if( desc(row_idx, col_idx) == NO_POINT )
+                desc(row_idx, col_idx) = 0;
+
+    t_making_desc.toc("PolarContext making");
+
+    return desc;
+} // SCManager::makeScancontext
+
+
+MatrixXd SCManager::makeRingkeyFromScancontext( Eigen::MatrixXd &_desc )
+{
+    /* 
+     * summary: rowwise mean vector
+    */
+    Eigen::MatrixXd invariant_key(_desc.rows(), 1);
+    for ( int row_idx = 0; row_idx < _desc.rows(); row_idx++ )
+    {
+        Eigen::MatrixXd curr_row = _desc.row(row_idx);
+        invariant_key(row_idx, 0) = curr_row.mean();
+    }
+
+    return invariant_key;
+} // SCManager::makeRingkeyFromScancontext
+
+
+MatrixXd SCManager::makeSectorkeyFromScancontext( Eigen::MatrixXd &_desc )
+{
+    /* 
+     * summary: columnwise mean vector
+    */
+    Eigen::MatrixXd variant_key(1, _desc.cols());
+    for ( int col_idx = 0; col_idx < _desc.cols(); col_idx++ )
+    {
+        Eigen::MatrixXd curr_col = _desc.col(col_idx);
+        variant_key(0, col_idx) = curr_col.mean();
+    }
+
+    return variant_key;
+} // SCManager::makeSectorkeyFromScancontext
+
+
+const Eigen::MatrixXd& SCManager::getConstRefRecentSCD(void)
+{
+    return polarcontexts_.back();
+}
+
+
+void SCManager::makeAndSaveScancontextAndKeys( pcl::PointCloud<SCPointType> & _scan_down )
+{
+    Eigen::MatrixXd sc = makeScancontext(_scan_down); // v1 
+    Eigen::MatrixXd ringkey = makeRingkeyFromScancontext( sc );
+    Eigen::MatrixXd sectorkey = makeSectorkeyFromScancontext( sc );
+    std::vector<float> polarcontext_invkey_vec = eig2stdvec( ringkey );
+
+    polarcontexts_.push_back( sc ); 
+    polarcontext_invkeys_.push_back( ringkey );
+    polarcontext_vkeys_.push_back( sectorkey );
+    polarcontext_invkeys_mat_.push_back( polarcontext_invkey_vec );
+
+    // cout <<polarcontext_vkeys_.size() << endl;
+
+} // SCManager::makeAndSaveScancontextAndKeys
+
+
+std::pair<int, float> SCManager::detectLoopClosureID ( void )
+{
+    int loop_id { -1 }; // init with -1, -1 means no loop (== LeGO-LOAM's variable "closestHistoryFrameID")
+
+    auto curr_key = polarcontext_invkeys_mat_.back(); // current observation (query)
+    auto curr_desc = polarcontexts_.back(); // current observation (query)
+
+    /* 
+     * step 1: candidates from ringkey tree_
+     */
+    if( (int)polarcontext_invkeys_mat_.size() < NUM_EXCLUDE_RECENT + 1)
+    {
+        std::pair<int, float> result {loop_id, 0.0};
+        return result; // Early return 
+    }
+
+    // tree_ reconstruction (not mandatory to make everytime)
+    if( tree_making_period_conter % TREE_MAKING_PERIOD_ == 0) // to save computation cost
+    {
+        TicToc t_tree_construction;
+
+        polarcontext_invkeys_to_search_.clear();
+        polarcontext_invkeys_to_search_.assign( polarcontext_invkeys_mat_.begin(), polarcontext_invkeys_mat_.end() - NUM_EXCLUDE_RECENT ) ;
+
+        polarcontext_tree_.reset(); 
+        polarcontext_tree_ = std::make_unique<InvKeyTree>(PC_NUM_RING /* dim */, polarcontext_invkeys_to_search_, 10 /* max leaf */ );
+        // tree_ptr_->index->buildIndex(); // inernally called in the constructor of InvKeyTree (for detail, refer the nanoflann and KDtreeVectorOfVectorsAdaptor)
+        t_tree_construction.toc("Tree construction");
+    }
+    tree_making_period_conter = tree_making_period_conter + 1;
+        
+    double min_dist = 10000000; // init with somthing large
+    int nn_align = 0;
+    int nn_idx = 0;
+
+    // knn search
+    std::vector<size_t> candidate_indexes( NUM_CANDIDATES_FROM_TREE ); 
+    std::vector<float> out_dists_sqr( NUM_CANDIDATES_FROM_TREE );
+
+    TicToc t_tree_search;
+    nanoflann::KNNResultSet<float> knnsearch_result( NUM_CANDIDATES_FROM_TREE );
+    knnsearch_result.init( &candidate_indexes[0], &out_dists_sqr[0] );
+    polarcontext_tree_->index->findNeighbors( knnsearch_result, &curr_key[0] /* query */, nanoflann::SearchParams(10) ); 
+    t_tree_search.toc("Tree search");
+
+    /* 
+     *  step 2: pairwise distance (find optimal columnwise best-fit using cosine distance)
+     */
+    TicToc t_calc_dist;   
+    for ( int candidate_iter_idx = 0; candidate_iter_idx < NUM_CANDIDATES_FROM_TREE; candidate_iter_idx++ )
+    {
+        MatrixXd polarcontext_candidate = polarcontexts_[ candidate_indexes[candidate_iter_idx] ];
+        std::pair<double, int> sc_dist_result = distanceBtnScanContext( curr_desc, polarcontext_candidate ); 
+        
+        double candidate_dist = sc_dist_result.first;
+        int candidate_align = sc_dist_result.second;
+
+        if( candidate_dist < min_dist )
+        {
+            min_dist = candidate_dist;
+            nn_align = candidate_align;
+
+            nn_idx = candidate_indexes[candidate_iter_idx];
+        }
+    }
+    t_calc_dist.toc("Distance calc");
+
+    /* 
+     * loop threshold check
+     */
+    if( min_dist < SC_DIST_THRES )
+    {
+        loop_id = nn_idx; 
+    
+        // std::cout.precision(3); 
+        cout << "[Loop found] Nearest distance: " << min_dist << " btn " << polarcontexts_.size()-1 << " and " << nn_idx << "." << endl;
+        cout << "[Loop found] yaw diff: " << nn_align * PC_UNIT_SECTORANGLE << " deg." << endl;
+    }
+    else
+    {
+        std::cout.precision(3); 
+        cout << "[Not loop] Nearest distance: " << min_dist << " btn " << polarcontexts_.size()-1 << " and " << nn_idx << "." << endl;
+        cout << "[Not loop] yaw diff: " << nn_align * PC_UNIT_SECTORANGLE << " deg." << endl;
+    }
+
+    // To do: return also nn_align (i.e., yaw diff)
+    float yaw_diff_rad = deg2rad(nn_align * PC_UNIT_SECTORANGLE);
+    std::pair<int, float> result {loop_id, yaw_diff_rad};
+
+    return result;
+
+} // SCManager::detectLoopClosureID
+
+///////////
+
+
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
 double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN], s_plot10[MAXN], s_plot11[MAXN];
@@ -183,6 +533,7 @@ vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;   // 历史所有关
 pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D(new pcl::PointCloud<PointType>());         // 历史关键帧位姿（位置）
 pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D(new pcl::PointCloud<PointTypePose>()); // 历史关键帧位姿
 pcl::PointCloud<PointType>::Ptr copy_cloudKeyPoses3D(new pcl::PointCloud<PointType>());
+pcl::PointCloud<PointType>::Ptr copy_cloudKeyPoses2D; // giseop 
 pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D(new pcl::PointCloud<PointTypePose>());
 
 pcl::PointCloud<PointTypePose>::Ptr fastlio_unoptimized_cloudKeyPoses6D(new pcl::PointCloud<PointTypePose>()); //  存储fastlio 未优化的位姿
@@ -193,6 +544,16 @@ float mappingCornerLeafSize;
 float mappingSurfLeafSize;
 
 /*loop clousre*/
+
+// loop detector 
+    SCManager scManager;
+
+// giseop
+enum class SCInputType { 
+    SINGLE_SCAN_FULL, 
+    SINGLE_SCAN_FEAT, 
+    MULTI_SCAN_FEAT 
+}; 
 bool startFlag = true;
 bool loopClosureEnableFlag;
 float loopClosureFrequency; //   回环检测频率
@@ -214,7 +575,8 @@ bool aLoopIsClosed = false;
 map<int, int> loopIndexContainer; // from new to old
 vector<pair<int, int>> loopIndexQueue;
 vector<gtsam::Pose3> loopPoseQueue;
-vector<gtsam::noiseModel::Diagonal::shared_ptr> loopNoiseQueue;
+// vector<gtsam::noiseModel::Diagonal::shared_ptr> loopNoiseQueue;
+vector<gtsam::SharedNoiseModel> loopNoiseQueue; // giseop for polymorhpisam (Diagonal <- Gausssian <- Base)
 deque<std_msgs::Float64MultiArray> loopInfoVec;
 
 nav_msgs::Path globalPath;
@@ -557,6 +919,25 @@ void addOdomFactor()
     }
 }
 
+    // data saver
+    std::vector<std::string> edges_str;
+    std::vector<std::string> vertices_str;
+    
+    void writeEdge(const std::pair<int, int> _node_idx_pair, const gtsam::Pose3& _relPose)
+    {
+        gtsam::Point3 t = _relPose.translation();
+        gtsam::Rot3 R = _relPose.rotation();
+
+        std::string curEdgeInfo {
+            "EDGE_SE3:QUAT " + std::to_string(_node_idx_pair.first) + " " + std::to_string(_node_idx_pair.second) + " "
+            + std::to_string(t.x()) + " " + std::to_string(t.y()) + " " + std::to_string(t.z())  + " " 
+            + std::to_string(R.toQuaternion().x()) + " " + std::to_string(R.toQuaternion().y()) + " " 
+            + std::to_string(R.toQuaternion().z()) + " " + std::to_string(R.toQuaternion().w()) };
+
+        // pgEdgeSaveStream << curEdgeInfo << std::endl;
+        edges_str.emplace_back(curEdgeInfo);
+    }
+
     /**
      * 4. 添加回环因子（回环信息由独立线程提供）
      *   1）回环队列为空，直接返回
@@ -577,8 +958,10 @@ void addLoopFactor()
         int indexTo = loopIndexQueue[i].second;  //    pre
         // 闭环边的位姿变换
         gtsam::Pose3 poseBetween = loopPoseQueue[i];
-        gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
+        // gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
+        auto noiseBetween = loopNoiseQueue[i]; // giseop for polymorhpism
         gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
+        writeEdge({indexFrom, indexTo}, poseBetween); // giseop
     }
 
     loopIndexQueue.clear();
@@ -798,8 +1181,15 @@ bool detectLoopClosureDistance(int *latestID, int *closestID)
     // 在历史关键帧中查找与当前关键帧距离最近的关键帧集合
     std::vector<int> pointSearchIndLoop;                        //  候选关键帧索引
     std::vector<float> pointSearchSqDisLoop;                    //  候选关键帧距离
-    kdtreeHistoryKeyPoses->setInputCloud(copy_cloudKeyPoses3D); //  历史帧构建kdtree
-    kdtreeHistoryKeyPoses->radiusSearch(copy_cloudKeyPoses3D->back(), historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
+    // kdtreeHistoryKeyPoses->setInputCloud(copy_cloudKeyPoses3D); //  历史帧构建kdtree
+    // kdtreeHistoryKeyPoses->radiusSearch(copy_cloudKeyPoses3D->back(), historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
+
+    for (int i = 0; i < (int)copy_cloudKeyPoses2D->size(); i++) // giseop
+            copy_cloudKeyPoses2D->points[i].z = 1.1; // to relieve the z-axis drift, 1.1 is just foo val
+
+    kdtreeHistoryKeyPoses->setInputCloud(copy_cloudKeyPoses2D); // giseop
+    kdtreeHistoryKeyPoses->radiusSearch(copy_cloudKeyPoses2D->back(), historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0); // giseop
+
     // 在候选关键帧集合中，找到与当前帧时间相隔较远的帧，设为候选匹配帧
     for (int i = 0; i < (int)pointSearchIndLoop.size(); ++i)
     {
@@ -818,6 +1208,60 @@ bool detectLoopClosureDistance(int *latestID, int *closestID)
     ROS_INFO("Find loop clousre frame ");
     return true;
 }
+
+bool detectLoopClosureExternal(int *latestID, int *closestID)
+    {
+        // this function is not used yet, please ignore it
+        int loopKeyCur = -1;
+        int loopKeyPre = -1;
+
+        std::lock_guard<std::mutex> lock(mtxLoopInfo);
+        if (loopInfoVec.empty())
+            return false;
+
+        double loopTimeCur = loopInfoVec.front().data[0];
+        double loopTimePre = loopInfoVec.front().data[1];
+        loopInfoVec.pop_front();
+
+        if (abs(loopTimeCur - loopTimePre) < historyKeyframeSearchTimeDiff)
+            return false;
+
+        int cloudSize = copy_cloudKeyPoses6D->size();
+        if (cloudSize < 2)
+            return false;
+
+        // latest key
+        loopKeyCur = cloudSize - 1;
+        for (int i = cloudSize - 1; i >= 0; --i)
+        {
+            if (copy_cloudKeyPoses6D->points[i].time >= loopTimeCur)
+                loopKeyCur = round(copy_cloudKeyPoses6D->points[i].intensity);
+            else
+                break;
+        }
+
+        // previous key
+        loopKeyPre = 0;
+        for (int i = 0; i < cloudSize; ++i)
+        {
+            if (copy_cloudKeyPoses6D->points[i].time <= loopTimePre)
+                loopKeyPre = round(copy_cloudKeyPoses6D->points[i].intensity);
+            else
+                break;
+        }
+
+        if (loopKeyCur == loopKeyPre)
+            return false;
+
+        auto it = loopIndexContainer.find(loopKeyCur);
+        if (it != loopIndexContainer.end())
+            return false;
+
+        *latestID = loopKeyCur;
+        *closestID = loopKeyPre;
+
+        return true;
+    }
 
 /**
  * 提取key索引的关键帧前后相邻若干帧的关键帧特征点集合，降采样
@@ -852,7 +1296,7 @@ void loopFindNearKeyframes(pcl::PointCloud<PointType>::Ptr &nearKeyframes, const
     *nearKeyframes = *cloud_temp;
 }
 
-void performLoopClosure()
+void performRSLoopClosure()
 {
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time); //  时间戳
     string odometryFrame = "camera_init";
@@ -864,6 +1308,8 @@ void performLoopClosure()
 
     mtx.lock();
     *copy_cloudKeyPoses3D = *cloudKeyPoses3D;
+    copy_cloudKeyPoses2D->clear(); // giseop
+    *copy_cloudKeyPoses2D = *cloudKeyPoses3D; // giseop 
     *copy_cloudKeyPoses6D = *cloudKeyPoses6D;
     mtx.unlock();
 
@@ -871,12 +1317,13 @@ void performLoopClosure()
     int loopKeyCur;
     int loopKeyPre;
     // 在历史关键帧中查找与当前关键帧距离最近的关键帧集合，选择时间相隔较远的一帧作为候选闭环帧
-    if (detectLoopClosureDistance(&loopKeyCur, &loopKeyPre) == false)
-    {
-        return;
-    }
+    if (detectLoopClosureExternal(&loopKeyCur, &loopKeyPre) == false)
+            if (detectLoopClosureDistance(&loopKeyCur, &loopKeyPre) == false)
+                return;
 
-    // 提取
+    std::cout << "RS loop found! between " << loopKeyCur << " and " << loopKeyPre << "." << std::endl; // giseop
+
+    // 提取点云
     pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>()); //  cue keyframe
     pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>()); //   history keyframe submap
     {
@@ -907,10 +1354,12 @@ void performLoopClosure()
     gicp.align(*unused_result);
 
     // 未收敛，或者匹配不够好
-    if (gicp.hasConverged() == false || gicp.getFitnessScore() > historyKeyframeFitnessScore)
+    if (gicp.hasConverged() == false || gicp.getFitnessScore() > historyKeyframeFitnessScore){
+        std::cout << "GICP fitness test failed (" << gicp.getFitnessScore() << " > " << historyKeyframeFitnessScore << "). Reject this RS loop." << std::endl;
         return;
-
-    std::cout << "gicp  success  " << std::endl;
+    } else {
+            std::cout << "GICP fitness test passed (" << gicp.getFitnessScore() << " < " << historyKeyframeFitnessScore << "). Add this RS loop." << std::endl;
+    }
 
     // 发布当前关键帧经过闭环优化后的位姿变换之后的特征点云
     if (pubIcpKeyFrames.getNumSubscribers() != 0)
@@ -946,8 +1395,133 @@ void performLoopClosure()
     loopNoiseQueue.push_back(constraintNoise);
     mtx.unlock();
 
-    loopIndexContainer[loopKeyCur] = loopKeyPre; //   使用hash map 存储回环对
+    // add loop constriant
+    // loopIndexContainer[loopKeyCur] = loopKeyPre; //   使用hash map 存储回环对
+    loopIndexContainer.insert(std::pair<int, int>(loopKeyCur, loopKeyPre)); // giseop for multimap
+
 }
+
+void loopFindNearKeyframesWithRespectTo(pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& searchNum, const int _wrt_key)
+    {
+        // extract near keyframes
+        nearKeyframes->clear();
+        int cloudSize = copy_cloudKeyPoses6D->size();
+        for (int i = -searchNum; i <= searchNum; ++i)
+        {
+            int keyNear = key + i;
+            if (keyNear < 0 || keyNear >= cloudSize )
+                continue;
+            // *nearKeyframes += *transformPointCloud(cornerCloudKeyFrames[keyNear], &copy_cloudKeyPoses6D->points[_wrt_key]);
+            *nearKeyframes += *transformPointCloud(surfCloudKeyFrames[keyNear],   &copy_cloudKeyPoses6D->points[_wrt_key]);
+        }
+
+        if (nearKeyframes->empty())
+            return;
+
+        // downsample near keyframes
+        pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
+        downSizeFilterICP.setInputCloud(nearKeyframes);
+        downSizeFilterICP.filter(*cloud_temp);
+        *nearKeyframes = *cloud_temp;
+    }
+
+void performSCLoopClosure()
+    {
+        ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time); //  时间戳
+        string odometryFrame = "camera_init";
+
+        if (cloudKeyPoses3D->points.empty() == true)
+            return;
+
+        // find keys
+        auto detectResult = scManager.detectLoopClosureID(); // first: nn index, second: yaw diff 
+        int loopKeyCur = copy_cloudKeyPoses3D->size() - 1;;
+        int loopKeyPre = detectResult.first;
+        float yawDiffRad = detectResult.second; // not use for v1 (because pcl icp withi initial somthing wrong...)
+        if( loopKeyPre == -1 /* No loop found */)
+            return;
+
+        std::cout << "SC loop found! between " << loopKeyCur << " and " << loopKeyPre << "." << std::endl; // giseop
+
+        // extract cloud
+        pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
+        pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>());
+        {
+
+            int base_key = 0;
+            loopFindNearKeyframesWithRespectTo(cureKeyframeCloud, loopKeyCur, 0, base_key); // giseop 
+            loopFindNearKeyframesWithRespectTo(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, base_key); // giseop 
+
+            // if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000)
+            //     return;
+            if (pubHistoryKeyFrames.getNumSubscribers() != 0)
+                publishCloud(&pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, odometryFrame);
+        }
+
+        // GICP Settings
+        static pcl::GeneralizedIterativeClosestPoint<PointType, PointType> gicp;
+        gicp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter 
+        gicp.setMaximumIterations(100);
+        gicp.setTransformationEpsilon(1e-6);
+        gicp.setEuclideanFitnessEpsilon(1e-6);
+        gicp.setRANSACIterations(0);
+
+        // Align clouds
+        gicp.setInputSource(cureKeyframeCloud);
+        gicp.setInputTarget(prevKeyframeCloud);
+        pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
+        gicp.align(*unused_result);
+        // giseop 
+        // TODO gicp align with initial 
+
+        if (gicp.hasConverged() == false || gicp.getFitnessScore() > historyKeyframeFitnessScore) {
+            std::cout << "ICP fitness test failed (" << gicp.getFitnessScore() << " > " << historyKeyframeFitnessScore << "). Reject this SC loop." << std::endl;
+            return;
+        } else {
+            std::cout << "ICP fitness test passed (" << gicp.getFitnessScore() << " < " << historyKeyframeFitnessScore << "). Add this SC loop." << std::endl;
+        }
+
+        // publish corrected cloud
+        if (pubIcpKeyFrames.getNumSubscribers() != 0)
+        {
+            pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
+            pcl::transformPointCloud(*cureKeyframeCloud, *closed_cloud, gicp.getFinalTransformation());
+            publishCloud(&pubIcpKeyFrames, closed_cloud, timeLaserInfoStamp, odometryFrame);
+        }
+
+        // Get pose transformation
+        float x, y, z, roll, pitch, yaw;
+        Eigen::Affine3f correctionLidarFrame;
+        correctionLidarFrame = gicp.getFinalTransformation();
+
+        // giseop 
+        pcl::getTranslationAndEulerAngles (correctionLidarFrame, x, y, z, roll, pitch, yaw);
+        gtsam::Pose3 poseFrom = gtsam::Pose3(gtsam::Rot3::RzRyRx(roll, pitch, yaw), gtsam::Point3(x, y, z));
+        gtsam::Pose3 poseTo = gtsam::Pose3(gtsam::Rot3::RzRyRx(0.0, 0.0, 0.0), gtsam::Point3(0.0, 0.0, 0.0));
+
+        // giseop, robust kernel for a SC loop
+        float robustNoiseScore = 0.5; // constant is ok...
+        gtsam::Vector robustNoiseVector6(6); 
+        robustNoiseVector6 << robustNoiseScore, robustNoiseScore, robustNoiseScore, robustNoiseScore, robustNoiseScore, robustNoiseScore;
+        gtsam::noiseModel::Base::shared_ptr robustConstraintNoise; 
+        robustConstraintNoise = gtsam::noiseModel::Robust::Create(
+            gtsam::noiseModel::mEstimator::Cauchy::Create(1), // optional: replacing Cauchy by DCS or GemanMcClure, but with a good front-end loop detector, Cauchy is empirically enough.
+            gtsam::noiseModel::Diagonal::Variances(robustNoiseVector6)
+        ); // - checked it works. but with robust kernel, map modification may be delayed (i.e,. requires more true-positive loop factors)
+
+        // Add pose constraint
+        mtx.lock();
+        loopIndexQueue.push_back(make_pair(loopKeyCur, loopKeyPre));
+        loopPoseQueue.push_back(poseFrom.between(poseTo));
+        loopNoiseQueue.push_back(robustConstraintNoise);
+        mtx.unlock();
+
+        // add loop constriant
+        // loopIndexContainer[loopKeyCur] = loopKeyPre;
+        loopIndexContainer.insert(std::pair<int, int>(loopKeyCur, loopKeyPre)); // giseop for multimap
+    } // performSCLoopClosure
+
+
 
 //回环检测线程
 void loopClosureThread()
@@ -962,7 +1536,8 @@ void loopClosureThread()
     while (ros::ok() && startFlag)
     {
         rate.sleep();
-        performLoopClosure();   //  回环检测
+        performRSLoopClosure();   //  回环检测
+        performSCLoopClosure(); // giseop
         visualizeLoopClosure(); // rviz展示闭环边
     }
 }
