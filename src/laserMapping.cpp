@@ -176,7 +176,7 @@ geometry_msgs::PoseStamped msg_body_pose;
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
 
-/*back end*/
+// 后端优化
 vector<pcl::PointCloud<PointType>::Ptr> cornerCloudKeyFrames; // 历史所有关键帧的角点集合（降采样）
 vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;   // 历史所有关键帧的平面点集合（降采样）
 
@@ -398,30 +398,6 @@ float pointDistance(PointType p)
 float pointDistance(PointType p1, PointType p2)
 {
     return sqrt((p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y) + (p1.z - p2.z) * (p1.z - p2.z));
-}
-
-/**
- * 初始化
- */
-void allocateMemory()
-{
-    cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
-    cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
-    copy_cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
-    copy_cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
-
-    kdtreeSurroundingKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
-    kdtreeHistoryKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
-
-    laserCloudOri.reset(new pcl::PointCloud<PointType>());
-
-    kdtreeCornerFromMap.reset(new pcl::KdTreeFLANN<PointType>());
-    kdtreeSurfFromMap.reset(new pcl::KdTreeFLANN<PointType>());
-
-    for (int i = 0; i < 6; ++i)
-    {
-        transformTobeMapped[i] = 0;
-    }
 }
 
 //  eulerAngle 2 Quaterniond
@@ -1923,36 +1899,6 @@ int main(int argc, char** argv)
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body);
             // publish_effect_world(pubLaserCloudEffect);
             // publish_map(pubLaserCloudMap);
-
-            /*** Debug variables ***/
-            // if (runtime_pos_log)
-            // {
-            //     frame_num ++;
-            //     kdtree_size_end = ikdtree.size();
-            //     aver_time_consu = aver_time_consu * (frame_num - 1) / frame_num + (t5 - t0) / frame_num;
-            //     aver_time_icp = aver_time_icp * (frame_num - 1)/frame_num + (t_update_end - t_update_start) / frame_num;
-            //     aver_time_match = aver_time_match * (frame_num - 1)/frame_num + (match_time)/frame_num;
-            //     aver_time_incre = aver_time_incre * (frame_num - 1)/frame_num + (kdtree_incremental_time)/frame_num;
-            //     aver_time_solve = aver_time_solve * (frame_num - 1)/frame_num + (solve_time + solve_H_time)/frame_num;
-            //     aver_time_const_H_time = aver_time_const_H_time * (frame_num - 1)/frame_num + solve_time / frame_num;
-            //     T1[time_log_counter] = Measures.lidar_beg_time;
-            //     s_plot[time_log_counter] = t5 - t0;
-            //     s_plot2[time_log_counter] = feats_undistort->points.size();
-            //     s_plot3[time_log_counter] = kdtree_incremental_time;
-            //     s_plot4[time_log_counter] = kdtree_search_time;
-            //     s_plot5[time_log_counter] = kdtree_delete_counter;
-            //     s_plot6[time_log_counter] = kdtree_delete_time;
-            //     s_plot7[time_log_counter] = kdtree_size_st;
-            //     s_plot8[time_log_counter] = kdtree_size_end;
-            //     s_plot9[time_log_counter] = aver_time_consu;
-            //     s_plot10[time_log_counter] = add_point_size;
-            //     time_log_counter ++;
-            //     printf("[ mapping ]: time: IMU + Map + Input Downsample: %0.6f ave match: %0.6f ave solve: %0.6f  ave ICP: %0.6f  map incre: %0.6f ave total: %0.6f icp: %0.6f construct H: %0.6f \n",t1-t0,aver_time_match,aver_time_solve,t3-t1,t5-t3,aver_time_consu,aver_time_icp, aver_time_const_H_time);
-            //     ext_euler = SO3ToEuler(state_point.offset_R_L_I);
-            //     fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " " << euler_cur.transpose() << " " << state_point.pos.transpose()<< " " << ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<<" "<< state_point.vel.transpose() \
-            //     <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
-            //     dump_lio_state_to_log(fp);
-            // }
         }
 
         status = ros::ok();
@@ -1973,24 +1919,6 @@ int main(int argc, char** argv)
 
     fout_out.close();
     fout_pre.close();
-
-    // if (runtime_pos_log)
-    // {
-    //     vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;    
-    //     FILE *fp2;
-    //     string log_dir = root_dir + "/Log/fast_lio_time_log.csv";
-    //     fp2 = fopen(log_dir.c_str(),"w");
-    //     fprintf(fp2,"time_stamp, total time, scan point size, incremental time, search time, delete size, delete time, tree size st, tree size end, add point size, preprocess time\n");
-    //     for (int i = 0;i<time_log_counter; i++){
-    //         fprintf(fp2,"%0.8f,%0.8f,%d,%0.8f,%0.8f,%d,%0.8f,%d,%d,%d,%0.8f\n",T1[i],s_plot[i],int(s_plot2[i]),s_plot3[i],s_plot4[i],int(s_plot5[i]),s_plot6[i],int(s_plot7[i]),int(s_plot8[i]), int(s_plot10[i]), s_plot11[i]);
-    //         t.push_back(T1[i]);
-    //         s_vec.push_back(s_plot9[i]);
-    //         s_vec2.push_back(s_plot3[i] + s_plot6[i]);
-    //         s_vec3.push_back(s_plot4[i]);
-    //         s_vec5.push_back(s_plot[i]);
-    //     }
-    //     fclose(fp2);
-    // }
 
     return 0;
 }
